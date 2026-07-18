@@ -893,6 +893,10 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
                             && inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
                         dictionarySuggestions = filterAcronyms(dictionarySuggestions);
                     }
+                    // Speed-aware: on fast swipes, narrow toward common words.
+                    if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
+                        dictionarySuggestions = applySpeedAwareFilter(dictionarySuggestions, composedData);
+                    }
 
                     if (!dictionarySuggestions.isEmpty()) {
                         suggestionResults.addAll(dictionarySuggestions);
@@ -925,6 +929,10 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
                 if (BLOCK_ACRONYMS_IN_SWIPE
                         && inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
                     dictionarySuggestions = filterAcronyms(dictionarySuggestions);
+                }
+                // Speed-aware: on fast swipes, narrow toward common words.
+                if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
+                    dictionarySuggestions = applySpeedAwareFilter(dictionarySuggestions, composedData);
                 }
                 suggestionResults.addAll(dictionarySuggestions);
                 if (null != suggestionResults.mRawSuggestions) {
@@ -986,6 +994,76 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
             }
         }
         return hasLetter;
+    }
+
+    // --- Speed-aware swipe ranking (issue #1) ---
+    // EMA of swipe speed (ms per input point). -1 = uninitialized. In-memory only for now;
+    // persistence across sessions is wired in a follow-up — see issue #1.
+    private float mSwipeSpeedEma = -1f;
+
+    private static final float SWIPE_SPEED_EMA_ALPHA = 0.9f;
+    /** Only narrow candidates when meaningfully faster than the user's own baseline. */
+    private static final float SWIPE_SPEED_BOOST_THRESHOLD = 1.2f;
+    /** Faster-than-baseline ratio maps to a minimum word frequency; scale tunes aggressiveness. */
+    private static final float SWIPE_FREQ_CUTOFF_SCALE = 80.0f;
+
+    /** Swipe speed as ms per input point (lower = faster). NaN if unmeasurable. */
+    private static float computeSwipeSpeed(final ComposedData composedData) {
+        final org.futo.inputmethod.latin.common.InputPointers pointers = composedData.mInputPointers;
+        final int size = pointers.getPointerSize();
+        if (size < 2) return Float.NaN;
+        final int[] times = pointers.getTimes();
+        final int duration = times[size - 1] - times[0];
+        if (duration <= 0) return Float.NaN;
+        return (float) duration / (float) size;
+    }
+
+    /** Max frequency of a word across all loaded dictionaries (0 if absent everywhere). */
+    private int getWordFrequency(final String word) {
+        int max = 0;
+        for (final DictionaryGroup g : mDictionaryGroups) {
+            for (final String dictType : ALL_DICTIONARY_TYPES) {
+                final Dictionary d = g.getDict(dictType);
+                if (d == null) continue;
+                final int f = d.getFrequency(word);
+                if (f > max) max = f;
+            }
+        }
+        return max;
+    }
+
+    /**
+     * On fast swipes, narrows the candidate set toward common words by dropping candidates
+     * whose dictionary frequency falls below a speed-scaled cutoff. At or below the user's
+     * baseline speed, the full set is kept. Never returns empty — falls back to the original
+     * list if everything would be filtered.
+     */
+    private ArrayList<SuggestedWordInfo> applySpeedAwareFilter(
+            final ArrayList<SuggestedWordInfo> suggestions, final ComposedData composedData) {
+        if (suggestions == null || suggestions.isEmpty()) return suggestions;
+        final float speed = computeSwipeSpeed(composedData);
+        if (Float.isNaN(speed)) return suggestions;
+
+        if (mSwipeSpeedEma < 0f) {
+            mSwipeSpeedEma = speed;
+        }
+        final float ratio = mSwipeSpeedEma / speed; // >1 means faster than baseline
+        mSwipeSpeedEma = (SWIPE_SPEED_EMA_ALPHA * mSwipeSpeedEma)
+                + ((1.0f - SWIPE_SPEED_EMA_ALPHA) * speed);
+
+        if (ratio <= SWIPE_SPEED_BOOST_THRESHOLD) return suggestions;
+
+        final int minFreq = (int) Math.min(255,
+                (ratio - SWIPE_SPEED_BOOST_THRESHOLD) * SWIPE_FREQ_CUTOFF_SCALE);
+        if (minFreq <= 0) return suggestions;
+
+        final ArrayList<SuggestedWordInfo> filtered = new ArrayList<>();
+        for (final SuggestedWordInfo info : suggestions) {
+            if (getWordFrequency(info.mWord) >= minFreq) {
+                filtered.add(info);
+            }
+        }
+        return filtered.isEmpty() ? suggestions : filtered;
     }
 
     public boolean isValidSpellingWord(final String word) {
