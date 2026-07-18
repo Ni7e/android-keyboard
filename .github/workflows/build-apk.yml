@@ -16,6 +16,9 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Fetch master (build.gradle computes versionCode from it)
+        run: git fetch origin master:master
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
