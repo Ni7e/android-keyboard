@@ -100,6 +100,8 @@ public final class Settings implements SharedPreferences.OnSharedPreferenceChang
     public static final String PREF_GESTURE_FLOATING_PREVIEW_TEXT =
             "pref_gesture_floating_preview_text";
     public static final String PREF_SHOW_SETUP_WIZARD_ICON = "pref_show_setup_wizard_icon";
+    public static final String PREF_SWIPE_SPEED_EMA = "swipe_speed_ema";
+    public static final String PREF_REJECTION_PENALTIES = "rejection_penalties";
 
     public static final String PREF_KEY_IS_INTERNAL = "pref_key_is_internal";
 
@@ -466,6 +468,20 @@ public final class Settings implements SharedPreferences.OnSharedPreferenceChang
     public Set<String> readCorpusHandlesForPersonalization() {
         final Set<String> emptySet = Collections.emptySet();
         return mPrefs.getStringSet(PREF_CORPUS_HANDLES_FOR_PERSONALIZATION, emptySet);
+    }
+
+    // --- Swipe personalization persistence (issue #3); lives in default prefs → backed up. ---
+    public void writeSwipeSpeedEma(final float ema) {
+        mPrefs.edit().putFloat(PREF_SWIPE_SPEED_EMA, ema).apply();
+    }
+    public float readSwipeSpeedEma(final float defaultValue) {
+        return mPrefs.getFloat(PREF_SWIPE_SPEED_EMA, defaultValue);
+    }
+    public void writeRejectionPenalties(final String serialized) {
+        mPrefs.edit().putString(PREF_REJECTION_PENALTIES, serialized).apply();
+    }
+    public String readRejectionPenalties() {
+        return mPrefs.getString(PREF_REJECTION_PENALTIES, "");
     }
 
     public static void writeEmojiRecentKeys(final SharedPreferences prefs, String str) {

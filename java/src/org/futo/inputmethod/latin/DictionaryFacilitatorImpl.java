@@ -18,7 +18,6 @@ package org.futo.inputmethod.latin;
 
 import android.Manifest;
 import android.content.Context;
-import android.content.SharedPreferences;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.LruCache;
@@ -368,7 +367,6 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
             final String dictNamePrefix,
             @Nullable final DictionaryInitializationListener listener) {
 
-        mPersistenceContext = context;  // issue #3: capture for persistence
         mPrevKeyboard = null;
         if(DictionaryFacilitatorImpl.swipeDecoderDictionary == null) {
             DictionaryFacilitatorImpl.swipeDecoderDictionary = new SwipeDecoderDictionary(context, Locale.ENGLISH);
@@ -1136,60 +1134,46 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
         return result;
     }
 
-    // --- Persistence (issue #3): survive keyboard restarts ---
-    // Context is captured lazily from resetDictionaries (no constructor change). All persistence
-    // is null-guarded — if Context isn't captured yet, these are no-ops. Writes use apply() (async,
-    // non-blocking) and the penalty map is flushed at most once per PENALTY_FLUSH_THROTTLE_MS so
-    // serializing a growing map never sits on the reject/accept hot path.
-    private volatile Context mPersistenceContext;
-    private final Object mPersistenceLock = new Object();
-    private boolean mPersistenceLoaded = false;
-    private volatile long mLastPenaltyFlushMs = 0L;
-    private static final String PERSIST_PREF_NAME = "swipe_personalization";
-    private static final String PERSIST_KEY_EMA = "swipe_speed_ema";
-    private static final String PERSIST_KEY_PENALTIES = "rejection_penalties";
+    // --- Persistence (issue #3): survive keyboard restarts, via the default Settings prefs ---
+    // Routed through Settings.getInstance() so the state lives in the DEFAULT SharedPreferences
+    // file (covered by BackupAgent → survives reinstall too) and avoids any facilitator-instance
+    // mismatch. The penalty map is flushed throttled so serializing never sits on the hot path.
     private static final long PENALTY_FLUSH_THROTTLE_MS = 10_000L;
+    private volatile long mLastPenaltyFlushMs = 0L;
+    private boolean mPersistenceLoaded = false;
 
     /** Load saved EMA + penalties once, lazily. Idempotent after the first call. */
     private void ensurePersistenceLoaded() {
         if (mPersistenceLoaded) return;
-        synchronized (mPersistenceLock) {
-            if (mPersistenceLoaded) return;
-            mPersistenceLoaded = true;
-            final Context ctx = mPersistenceContext;
-            if (ctx == null) return;
-            try {
-                final SharedPreferences prefs =
-                        ctx.getSharedPreferences(PERSIST_PREF_NAME, Context.MODE_PRIVATE);
-                final float savedEma = prefs.getFloat(PERSIST_KEY_EMA, Float.NaN);
-                if (!Float.isNaN(savedEma) && savedEma > 0f) mSwipeSpeedEma = savedEma;
-                final String savedPenalties = prefs.getString(PERSIST_KEY_PENALTIES, "");
-                if (savedPenalties != null && !savedPenalties.isEmpty()) {
-                    deserializePenalties(savedPenalties);
-                }
-            } catch (Exception ignored) { }
-        }
+        mPersistenceLoaded = true;
+        try {
+            final Settings settings = Settings.getInstance();
+            if (settings == null) return;
+            final float savedEma = settings.readSwipeSpeedEma(Float.NaN);
+            if (!Float.isNaN(savedEma) && savedEma > 0f) mSwipeSpeedEma = savedEma;
+            final String savedPenalties = settings.readRejectionPenalties();
+            if (savedPenalties != null && !savedPenalties.isEmpty()) {
+                deserializePenalties(savedPenalties);
+            }
+        } catch (Exception ignored) { }
     }
 
     private void persistEma() {
-        final Context ctx = mPersistenceContext;
-        if (ctx == null) return;
         try {
-            ctx.getSharedPreferences(PERSIST_PREF_NAME, Context.MODE_PRIVATE)
-                    .edit().putFloat(PERSIST_KEY_EMA, mSwipeSpeedEma).apply();
+            final Settings settings = Settings.getInstance();
+            if (settings != null) settings.writeSwipeSpeedEma(mSwipeSpeedEma);
         } catch (Exception ignored) { }
     }
 
     /** Flush the penalty map to disk, throttled to avoid serializing on every reject/accept. */
     private void persistPenaltiesIfDue() {
-        final Context ctx = mPersistenceContext;
-        if (ctx == null || mRejectionPenalties.isEmpty()) return;
+        if (mRejectionPenalties.isEmpty()) return;
         final long now = System.currentTimeMillis();
         if (now - mLastPenaltyFlushMs < PENALTY_FLUSH_THROTTLE_MS) return;
         mLastPenaltyFlushMs = now;
         try {
-            ctx.getSharedPreferences(PERSIST_PREF_NAME, Context.MODE_PRIVATE)
-                    .edit().putString(PERSIST_KEY_PENALTIES, serializePenalties()).apply();
+            final Settings settings = Settings.getInstance();
+            if (settings != null) settings.writeRejectionPenalties(serializePenalties());
         } catch (Exception ignored) { }
     }
 
