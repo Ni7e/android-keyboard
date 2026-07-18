@@ -901,7 +901,7 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
                     }
                     // Speed-aware: on fast swipes, narrow toward common words.
                     if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
-                        dictionarySuggestions = applySpeedAwareFilter(dictionarySuggestions, composedData);
+                        dictionarySuggestions = applySpeedAwareReRank(dictionarySuggestions, composedData);
                     }
                     // #2: continuously demote words the user has rejected before.
                     if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
@@ -942,7 +942,7 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
                 }
                 // Speed-aware: on fast swipes, narrow toward common words.
                 if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
-                    dictionarySuggestions = applySpeedAwareFilter(dictionarySuggestions, composedData);
+                    dictionarySuggestions = applySpeedAwareReRank(dictionarySuggestions, composedData);
                 }
                 // #2: continuously demote words the user has rejected before.
                 if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
@@ -1016,10 +1016,8 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
     private float mSwipeSpeedEma = -1f;
 
     private static final float SWIPE_SPEED_EMA_ALPHA = 0.9f;
-    /** Only narrow candidates when meaningfully faster than the user's own baseline. */
-    private static final float SWIPE_SPEED_BOOST_THRESHOLD = 1.2f;
-    /** Faster-than-baseline ratio maps to a minimum word frequency; scale tunes aggressiveness. */
-    private static final float SWIPE_FREQ_CUTOFF_SCALE = 80.0f;
+    /** How strongly a fast swipe boosts common words. Higher = common words climb more aggressively. */
+    private static final float SWIPE_BOOST_STRENGTH = 2.0f;
 
     /** Swipe speed as ms per input point (lower = faster). NaN if unmeasurable. */
     private static float computeSwipeSpeed(final ComposedData composedData) {
@@ -1047,12 +1045,12 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
     }
 
     /**
-     * On fast swipes, narrows the candidate set toward common words by dropping candidates
-     * whose dictionary frequency falls below a speed-scaled cutoff. At or below the user's
-     * baseline speed, the full set is kept. Never returns empty — falls back to the original
-     * list if everything would be filtered.
+     * Continuous, proportional re-rank (no hard cutoff): the faster you swipe relative to your own
+     * baseline, the more common (high-frequency) words are nudged UP in score — so they naturally
+     * overtake rarer ones. Rare words are never dropped, only relatively sunk. At or below baseline
+     * speed, scores are unchanged. Mirrors #2's applyRejectionPenalty pattern.
      */
-    private ArrayList<SuggestedWordInfo> applySpeedAwareFilter(
+    private ArrayList<SuggestedWordInfo> applySpeedAwareReRank(
             final ArrayList<SuggestedWordInfo> suggestions, final ComposedData composedData) {
         if (suggestions == null || suggestions.isEmpty()) return suggestions;
         final float speed = computeSwipeSpeed(composedData);
@@ -1065,19 +1063,20 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
         mSwipeSpeedEma = (SWIPE_SPEED_EMA_ALPHA * mSwipeSpeedEma)
                 + ((1.0f - SWIPE_SPEED_EMA_ALPHA) * speed);
 
-        if (ratio <= SWIPE_SPEED_BOOST_THRESHOLD) return suggestions;
+        if (ratio <= 1.0f) return suggestions; // not faster than baseline — no boost
 
-        final int minFreq = (int) Math.min(255,
-                (ratio - SWIPE_SPEED_BOOST_THRESHOLD) * SWIPE_FREQ_CUTOFF_SCALE);
-        if (minFreq <= 0) return suggestions;
-
-        final ArrayList<SuggestedWordInfo> filtered = new ArrayList<>();
+        final ArrayList<SuggestedWordInfo> result = new ArrayList<>(suggestions.size());
         for (final SuggestedWordInfo info : suggestions) {
-            if (getWordFrequency(info.mWord) >= minFreq) {
-                filtered.add(info);
-            }
+            final int freq = getWordFrequency(info.mWord);
+            final float freqNorm = Math.min(1.0f, freq / 255.0f); // 0..1
+            final float multiplier = 1.0f + SWIPE_BOOST_STRENGTH * (ratio - 1.0f) * freqNorm;
+            final int newScore = (int) Math.min(Integer.MAX_VALUE, (long)(info.mScore * multiplier));
+            result.add(new SuggestedWordInfo(info.mWord, info.mPrevWordsContext, newScore,
+                    info.mKindAndFlags, info.mSourceDict, info.mIndexOfTouchPointOfSecondWord,
+                    info.mAutoCommitFirstWordConfidence, info.mCandidateIndex,
+                    info.mCandidateDescription));
         }
-        return filtered.isEmpty() ? suggestions : filtered;
+        return result;
     }
 
     // --- Personalized ranking (issue #2): continuous demotion on rejection, recovery on accept ---
