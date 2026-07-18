@@ -882,20 +882,28 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
             updateSwipeLayoutAndDictsIfNeeded(Settings.getInstance().getCurrent(), keyboard);
 
             if(SwipeDecoderDictionary.canBeUsed()) {
-                final ArrayList<SuggestedWordInfo> dictionarySuggestions =
+                ArrayList<SuggestedWordInfo> dictionarySuggestions =
                         DictionaryFacilitatorImpl.swipeDecoderDictionary.getSuggestions(composedData, ngramContext,
                             inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH, getTrieWeights());
 
                 if (dictionarySuggestions != null) {
-                    suggestionResults.addAll(dictionarySuggestions);
-                    if (null != suggestionResults.mRawSuggestions) {
-                        suggestionResults.mRawSuggestions.addAll(dictionarySuggestions);
+                    // Personal pref: never surface acronyms (NHL, FBI, NASA) from swipe input.
+                    // Acronyms are typed manually; only swipe is filtered, never typing.
+                    if (BLOCK_ACRONYMS_IN_SWIPE
+                            && inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
+                        dictionarySuggestions = filterAcronyms(dictionarySuggestions);
                     }
 
-                    if(!dictionarySuggestions.isEmpty())
+                    if (!dictionarySuggestions.isEmpty()) {
+                        suggestionResults.addAll(dictionarySuggestions);
+                        if (null != suggestionResults.mRawSuggestions) {
+                            suggestionResults.mRawSuggestions.addAll(dictionarySuggestions);
+                        }
                         addEmojiSuggestionsForSwipe(suggestionResults, dictionarySuggestions.get(0));
-
-                    return suggestionResults;
+                        return suggestionResults;
+                    }
+                    // Filtered to empty, or decoder returned empty: fall through to the
+                    // typed-dictionary loop below so the strip is not blank.
                 }
             }
         }
@@ -907,11 +915,17 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
                 final float weightForLocale = composedData.mIsBatchMode
                         ? dictionaryGroup.mWeightForGesturingInLocale
                         : dictionaryGroup.mWeightForTypingInLocale;
-                final ArrayList<SuggestedWordInfo> dictionarySuggestions =
+                ArrayList<SuggestedWordInfo> dictionarySuggestions =
                         dictionary.getSuggestions(composedData, ngramContext,
                                 proximityInfoHandle, settingsValuesForSuggestion, sessionId,
                                 weightForLocale, weightOfLangModelVsSpatialModel);
                 if (null == dictionarySuggestions) continue;
+                // Same acronym filter as the swipe block: when this loop runs as the swipe
+                // fallback, don't let acronyms leak back in unfiltered.
+                if (BLOCK_ACRONYMS_IN_SWIPE
+                        && inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
+                    dictionarySuggestions = filterAcronyms(dictionarySuggestions);
+                }
                 suggestionResults.addAll(dictionarySuggestions);
                 if (null != suggestionResults.mRawSuggestions) {
                     suggestionResults.mRawSuggestions.addAll(dictionarySuggestions);
@@ -935,6 +949,43 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
 
             results.addAll(emojiSuggestions);
         }
+    }
+
+    /** Personal pref: filter acronyms out of swipe suggestions. Flip to false to disable. */
+    private static final boolean BLOCK_ACRONYMS_IN_SWIPE = true;
+
+    /**
+     * Removes acronym-looking suggestions from a list. Swipe-only; typing autocorrect
+     * is never filtered.
+     */
+    private static ArrayList<SuggestedWordInfo> filterAcronyms(
+            final ArrayList<SuggestedWordInfo> suggestions) {
+        final ArrayList<SuggestedWordInfo> filtered = new ArrayList<>();
+        for (SuggestedWordInfo info : suggestions) {
+            if (!isAcronym(info.mWord)) {
+                filtered.add(info);
+            }
+        }
+        return filtered;
+    }
+
+    /**
+     * Acronym: length >= 2 and every letter is uppercase. Non-letters (digits,
+     * apostrophes) are ignored; at least one letter must be present.
+     * Matches NHL, FBI, NASA, AMD, JPEG, AMD's. Also catches OK (acceptable).
+     * Skips Test, hello, I, and lowercase dict-form words.
+     */
+    private static boolean isAcronym(final CharSequence word) {
+        if (word == null || word.length() < 2) return false;
+        boolean hasLetter = false;
+        for (int i = 0; i < word.length(); i++) {
+            final char c = word.charAt(i);
+            if (Character.isLetter(c)) {
+                hasLetter = true;
+                if (!Character.isUpperCase(c)) return false;
+            }
+        }
+        return hasLetter;
     }
 
     public boolean isValidSpellingWord(final String word) {
