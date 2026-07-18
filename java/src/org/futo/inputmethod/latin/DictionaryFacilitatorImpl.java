@@ -18,6 +18,7 @@ package org.futo.inputmethod.latin;
 
 import android.Manifest;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.LruCache;
@@ -367,6 +368,7 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
             final String dictNamePrefix,
             @Nullable final DictionaryInitializationListener listener) {
 
+        mPersistenceContext = context;  // issue #3: capture for persistence
         mPrevKeyboard = null;
         if(DictionaryFacilitatorImpl.swipeDecoderDictionary == null) {
             DictionaryFacilitatorImpl.swipeDecoderDictionary = new SwipeDecoderDictionary(context, Locale.ENGLISH);
@@ -1011,8 +1013,7 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
     }
 
     // --- Speed-aware swipe ranking (issue #1) ---
-    // EMA of swipe speed (ms per input point). -1 = uninitialized. In-memory only for now;
-    // persistence across sessions is wired in a follow-up — see issue #1.
+    // EMA of swipe speed (ms per input point). -1 = uninitialized. Persisted to disk — see issue #3.
     private float mSwipeSpeedEma = -1f;
 
     private static final float SWIPE_SPEED_EMA_ALPHA = 0.9f;
@@ -1055,6 +1056,7 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
         if (suggestions == null || suggestions.isEmpty()) return suggestions;
         final float speed = computeSwipeSpeed(composedData);
         if (Float.isNaN(speed)) return suggestions;
+        ensurePersistenceLoaded();
 
         if (mSwipeSpeedEma < 0f) {
             mSwipeSpeedEma = speed;
@@ -1062,6 +1064,7 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
         final float ratio = mSwipeSpeedEma / speed; // >1 means faster than baseline
         mSwipeSpeedEma = (SWIPE_SPEED_EMA_ALPHA * mSwipeSpeedEma)
                 + ((1.0f - SWIPE_SPEED_EMA_ALPHA) * speed);
+        persistEma();
 
         if (ratio <= 1.0f) return suggestions; // not faster than baseline — no boost
 
@@ -1080,7 +1083,7 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
     }
 
     // --- Personalized ranking (issue #2): continuous demotion on rejection, recovery on accept ---
-    // Per-word penalty, lowercase key. In-memory only for now; persistence in a follow-up.
+    // Per-word penalty, lowercase key. Persisted to disk (throttled) — see issue #3.
     private final java.util.concurrent.ConcurrentHashMap<String, Integer> mRejectionPenalties =
             new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -1098,12 +1101,14 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
      */
     private void adjustRejectionPenalty(final String word, final int delta) {
         if (word == null || word.isEmpty()) return;
+        ensurePersistenceLoaded();
         mRejectionPenalties.compute(word, (k, old) -> {
             final int base = (old == null) ? 0 : old;
             final int v = base + delta;
             if (v <= 0) return null;           // forgiven (or never penalized) — drop the entry
             return Math.min(v, REJECTION_PENALTY_MAX);
         });
+        persistPenaltiesIfDue();
     }
 
     /**
@@ -1129,6 +1134,82 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
                     info.mCandidateDescription));
         }
         return result;
+    }
+
+    // --- Persistence (issue #3): survive keyboard restarts ---
+    // Context is captured lazily from resetDictionaries (no constructor change). All persistence
+    // is null-guarded — if Context isn't captured yet, these are no-ops. Writes use apply() (async,
+    // non-blocking) and the penalty map is flushed at most once per PENALTY_FLUSH_THROTTLE_MS so
+    // serializing a growing map never sits on the reject/accept hot path.
+    private volatile Context mPersistenceContext;
+    private final Object mPersistenceLock = new Object();
+    private boolean mPersistenceLoaded = false;
+    private volatile long mLastPenaltyFlushMs = 0L;
+    private static final String PERSIST_PREF_NAME = "swipe_personalization";
+    private static final String PERSIST_KEY_EMA = "swipe_speed_ema";
+    private static final String PERSIST_KEY_PENALTIES = "rejection_penalties";
+    private static final long PENALTY_FLUSH_THROTTLE_MS = 10_000L;
+
+    /** Load saved EMA + penalties once, lazily. Idempotent after the first call. */
+    private void ensurePersistenceLoaded() {
+        if (mPersistenceLoaded) return;
+        synchronized (mPersistenceLock) {
+            if (mPersistenceLoaded) return;
+            mPersistenceLoaded = true;
+            final Context ctx = mPersistenceContext;
+            if (ctx == null) return;
+            try {
+                final SharedPreferences prefs =
+                        ctx.getSharedPreferences(PERSIST_PREF_NAME, Context.MODE_PRIVATE);
+                final float savedEma = prefs.getFloat(PERSIST_KEY_EMA, Float.NaN);
+                if (!Float.isNaN(savedEma) && savedEma > 0f) mSwipeSpeedEma = savedEma;
+                final String savedPenalties = prefs.getString(PERSIST_KEY_PENALTIES, "");
+                if (savedPenalties != null && !savedPenalties.isEmpty()) {
+                    deserializePenalties(savedPenalties);
+                }
+            } catch (Exception ignored) { }
+        }
+    }
+
+    private void persistEma() {
+        final Context ctx = mPersistenceContext;
+        if (ctx == null) return;
+        try {
+            ctx.getSharedPreferences(PERSIST_PREF_NAME, Context.MODE_PRIVATE)
+                    .edit().putFloat(PERSIST_KEY_EMA, mSwipeSpeedEma).apply();
+        } catch (Exception ignored) { }
+    }
+
+    /** Flush the penalty map to disk, throttled to avoid serializing on every reject/accept. */
+    private void persistPenaltiesIfDue() {
+        final Context ctx = mPersistenceContext;
+        if (ctx == null || mRejectionPenalties.isEmpty()) return;
+        final long now = System.currentTimeMillis();
+        if (now - mLastPenaltyFlushMs < PENALTY_FLUSH_THROTTLE_MS) return;
+        mLastPenaltyFlushMs = now;
+        try {
+            ctx.getSharedPreferences(PERSIST_PREF_NAME, Context.MODE_PRIVATE)
+                    .edit().putString(PERSIST_KEY_PENALTIES, serializePenalties()).apply();
+        } catch (Exception ignored) { }
+    }
+
+    private String serializePenalties() {
+        final StringBuilder sb = new StringBuilder();
+        for (final Map.Entry<String, Integer> e : mRejectionPenalties.entrySet()) {
+            sb.append(e.getKey()).append('=').append(e.getValue()).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private void deserializePenalties(final String s) {
+        for (final String line : s.split("\n")) {
+            final int eq = line.indexOf('=');
+            if (eq <= 0) continue;
+            try {
+                final int v = Integer.parseInt(line.substring(eq + 1));
+                if (v > 0) mRejectionPenalties.put(line.substring(0, eq), v);
+            } catch (NumberFormatException ignored) { }
+        }
     }
 
     public boolean isValidSpellingWord(final String word) {
