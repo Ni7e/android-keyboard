@@ -893,19 +893,24 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
                             inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH, getTrieWeights());
 
                 if (dictionarySuggestions != null) {
-                    // Personal pref: never surface acronyms (NHL, FBI, NASA) from swipe input.
-                    // Acronyms are typed manually; only swipe is filtered, never typing.
-                    if (BLOCK_ACRONYMS_IN_SWIPE
-                            && inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
-                        dictionarySuggestions = filterAcronyms(dictionarySuggestions);
-                    }
-                    // Speed-aware: on fast swipes, narrow toward common words.
-                    if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
-                        dictionarySuggestions = applySpeedAwareReRank(dictionarySuggestions, composedData);
-                    }
-                    // #2: continuously demote words the user has rejected before.
-                    if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
-                        dictionarySuggestions = applyRejectionPenalty(dictionarySuggestions);
+                    try {
+                        // Personal pref: never surface acronyms (NHL, FBI, NASA) from swipe input.
+                        if (BLOCK_ACRONYMS_IN_SWIPE
+                                && inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
+                            dictionarySuggestions = filterAcronyms(dictionarySuggestions);
+                        }
+                        // Speed-aware: on fast swipes, boost common words proportionally.
+                        if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
+                            dictionarySuggestions = applySpeedAwareReRank(dictionarySuggestions, composedData);
+                        }
+                        // #2: continuously demote words the user has rejected before.
+                        if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
+                            dictionarySuggestions = applyRejectionPenalty(dictionarySuggestions);
+                        }
+                    } catch (final Throwable t) {
+                        // Never let a filter crash the keyboard — fall back to whatever was last
+                        // successfully applied and log so the cause is visible in logcat.
+                        Log.e("SwipeFilters", "swipe-block filter failed; using partial result", t);
                     }
 
                     if (!dictionarySuggestions.isEmpty()) {
@@ -934,19 +939,20 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
                                 proximityInfoHandle, settingsValuesForSuggestion, sessionId,
                                 weightForLocale, weightOfLangModelVsSpatialModel);
                 if (null == dictionarySuggestions) continue;
-                // Same acronym filter as the swipe block: when this loop runs as the swipe
-                // fallback, don't let acronyms leak back in unfiltered.
-                if (BLOCK_ACRONYMS_IN_SWIPE
-                        && inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
-                    dictionarySuggestions = filterAcronyms(dictionarySuggestions);
-                }
-                // Speed-aware: on fast swipes, narrow toward common words.
-                if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
-                    dictionarySuggestions = applySpeedAwareReRank(dictionarySuggestions, composedData);
-                }
-                // #2: continuously demote words the user has rejected before.
-                if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
-                    dictionarySuggestions = applyRejectionPenalty(dictionarySuggestions);
+                try {
+                    // Same filters as the swipe block, guarded the same way.
+                    if (BLOCK_ACRONYMS_IN_SWIPE
+                            && inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
+                        dictionarySuggestions = filterAcronyms(dictionarySuggestions);
+                    }
+                    if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
+                        dictionarySuggestions = applySpeedAwareReRank(dictionarySuggestions, composedData);
+                    }
+                    if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
+                        dictionarySuggestions = applyRejectionPenalty(dictionarySuggestions);
+                    }
+                } catch (final Throwable t) {
+                    Log.e("SwipeFilters", "typed-dict fallback filter failed; using partial result", t);
                 }
                 suggestionResults.addAll(dictionarySuggestions);
                 if (null != suggestionResults.mRawSuggestions) {
@@ -1020,24 +1026,29 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
 
     /** Swipe speed as ms per input point (lower = faster). NaN if unmeasurable. */
     private static float computeSwipeSpeed(final ComposedData composedData) {
+        if (composedData == null) return Float.NaN;
         final org.futo.inputmethod.latin.common.InputPointers pointers = composedData.mInputPointers;
+        if (pointers == null) return Float.NaN;
         final int size = pointers.getPointerSize();
         if (size < 2) return Float.NaN;
         final int[] times = pointers.getTimes();
+        if (times == null || times.length < size) return Float.NaN;
         final int duration = times[size - 1] - times[0];
         if (duration <= 0) return Float.NaN;
         return (float) duration / (float) size;
     }
 
-    /** Max frequency of a word across all loaded dictionaries (0 if absent everywhere). */
     private int getWordFrequency(final String word) {
+        if (word == null) return 0;
         int max = 0;
         for (final DictionaryGroup g : mDictionaryGroups) {
             for (final String dictType : ALL_DICTIONARY_TYPES) {
                 final Dictionary d = g.getDict(dictType);
                 if (d == null) continue;
-                final int f = d.getFrequency(word);
-                if (f > max) max = f;
+                try {
+                    final int f = d.getFrequency(word);
+                    if (f > max) max = f;
+                } catch (final Throwable ignored) { }
             }
         }
         return max;
