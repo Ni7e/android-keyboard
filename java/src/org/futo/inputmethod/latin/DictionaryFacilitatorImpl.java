@@ -981,6 +981,9 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
 
     /** Personal pref: filter acronyms out of swipe suggestions. Flip to false to disable. */
     private static final boolean BLOCK_ACRONYMS_IN_SWIPE = true;
+    // Master switch for the speed-aware (#1) and personalized (#2) re-rank features. Currently OFF
+    // while we isolate a swipe crash — the acronym filter above stays active. Flip to true to re-enable.
+    private static final boolean ENABLE_SWIPE_PERSONALIZATION = false;
 
     /**
      * Removes acronym-looking suggestions from a list. Swipe-only; typing autocorrect
@@ -1047,6 +1050,7 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
     private ArrayList<SuggestedWordInfo> applySpeedAwareReRank(
             final ArrayList<SuggestedWordInfo> suggestions, final ComposedData composedData) {
         if (suggestions == null || suggestions.isEmpty()) return suggestions;
+        if (!ENABLE_SWIPE_PERSONALIZATION) return suggestions;  // disabled during crash isolation
         final float speed = computeSwipeSpeed(composedData);
         if (Float.isNaN(speed)) return suggestions;
         ensurePersistenceLoaded();
@@ -1100,6 +1104,7 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
      */
     private void adjustRejectionPenalty(final String word, final int delta) {
         if (word == null || word.isEmpty()) return;
+        if (!ENABLE_SWIPE_PERSONALIZATION) return;  // disabled during crash isolation
         ensurePersistenceLoaded();
         mRejectionPenalties.compute(word, (k, old) -> {
             final int base = (old == null) ? 0 : old;
@@ -1118,6 +1123,7 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
     private ArrayList<SuggestedWordInfo> applyRejectionPenalty(
             final ArrayList<SuggestedWordInfo> suggestions) {
         if (suggestions == null || suggestions.isEmpty()) return suggestions;
+        if (!ENABLE_SWIPE_PERSONALIZATION) return suggestions;  // disabled during crash isolation
         final ArrayList<SuggestedWordInfo> result = new ArrayList<>(suggestions.size());
         for (final SuggestedWordInfo info : suggestions) {
             final Integer penalty = mRejectionPenalties.get(info.mWord.toLowerCase());
