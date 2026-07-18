@@ -1038,22 +1038,6 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
         return (float) duration / (float) size;
     }
 
-    private int getWordFrequency(final String word) {
-        if (word == null) return 0;
-        int max = 0;
-        for (final DictionaryGroup g : mDictionaryGroups) {
-            for (final String dictType : ALL_DICTIONARY_TYPES) {
-                final Dictionary d = g.getDict(dictType);
-                if (d == null) continue;
-                try {
-                    final int f = d.getFrequency(word);
-                    if (f > max) max = f;
-                } catch (final Throwable ignored) { }
-            }
-        }
-        return max;
-    }
-
     /**
      * Continuous, proportional re-rank (no hard cutoff): the faster you swipe relative to your own
      * baseline, the more common (high-frequency) words are nudged UP in score — so they naturally
@@ -1077,11 +1061,17 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
 
         if (ratio <= 1.0f) return suggestions; // not faster than baseline — no boost
 
+        // Normalize by the top score in this set so the commonest (highest decoder score) words
+        // get the biggest boost. Uses the decoder's own score — already encodes frequency — so no
+        // per-word dictionary lookup sits on the hot path (which risked blocking on first swipe).
+        int maxScore = 1;
+        for (final SuggestedWordInfo info : suggestions) {
+            if (info.mScore > maxScore) maxScore = info.mScore;
+        }
         final ArrayList<SuggestedWordInfo> result = new ArrayList<>(suggestions.size());
         for (final SuggestedWordInfo info : suggestions) {
-            final int freq = getWordFrequency(info.mWord);
-            final float freqNorm = Math.min(1.0f, freq / 255.0f); // 0..1
-            final float multiplier = 1.0f + SWIPE_BOOST_STRENGTH * (ratio - 1.0f) * freqNorm;
+            final float scoreNorm = (float) info.mScore / (float) maxScore; // 0..1
+            final float multiplier = 1.0f + SWIPE_BOOST_STRENGTH * (ratio - 1.0f) * scoreNorm;
             final int newScore = (int) Math.min(Integer.MAX_VALUE, (long)(info.mScore * multiplier));
             result.add(new SuggestedWordInfo(info.mWord, info.mPrevWordsContext, newScore,
                     info.mKindAndFlags, info.mSourceDict, info.mIndexOfTouchPointOfSecondWord,
