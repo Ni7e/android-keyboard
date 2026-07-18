@@ -22,14 +22,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK, NDK, CMake
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platforms;android-35
-            build-tools;35.0.0
-            ndk;28.2.13676358
-            cmake;3.22.1
+
+      - name: Install SDK platform, build-tools, NDK, CMake
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
 
       - name: Cache Gradle and native build
         uses: actions/cache@v4
