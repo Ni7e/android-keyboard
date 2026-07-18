@@ -698,6 +698,8 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
             addWordToUserHistory(mostConfidentDictionary, ngramContextForCurrentWord, currentWord,
                     wasCurrentWordAutoCapitalized, (int) timeStampInSeconds,
                     blockPotentiallyOffensive);
+            // #2: accepting a word forgives accumulated rejection penalty.
+            adjustRejectionPenalty(currentWord.toLowerCase(), -REJECTION_PENALTY_INCREMENT);
             ngramContextForCurrentWord =
                     ngramContextForCurrentWord.getNextNgramContext(new WordInfo(currentWord));
         }
@@ -796,6 +798,10 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
         // TODO: Decide whether or not to remove the word on EVENT_BACKSPACE.
         if (eventType != Constants.EVENT_BACKSPACE) {
             removeWord(Dictionary.TYPE_USER_HISTORY, word);
+        }
+        // #2: a rejected swipe word accumulates a continuous demotion penalty.
+        if (eventType == Constants.EVENT_REJECTION) {
+            adjustRejectionPenalty(word.toLowerCase(), REJECTION_PENALTY_INCREMENT);
         }
 
         // Update the spelling cache after unlearning. Words that are removed from user history
@@ -897,6 +903,10 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
                     if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
                         dictionarySuggestions = applySpeedAwareFilter(dictionarySuggestions, composedData);
                     }
+                    // #2: continuously demote words the user has rejected before.
+                    if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
+                        dictionarySuggestions = applyRejectionPenalty(dictionarySuggestions);
+                    }
 
                     if (!dictionarySuggestions.isEmpty()) {
                         suggestionResults.addAll(dictionarySuggestions);
@@ -933,6 +943,10 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
                 // Speed-aware: on fast swipes, narrow toward common words.
                 if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
                     dictionarySuggestions = applySpeedAwareFilter(dictionarySuggestions, composedData);
+                }
+                // #2: continuously demote words the user has rejected before.
+                if (inputStyle == SuggestedWords.INPUT_STYLE_TAIL_BATCH) {
+                    dictionarySuggestions = applyRejectionPenalty(dictionarySuggestions);
                 }
                 suggestionResults.addAll(dictionarySuggestions);
                 if (null != suggestionResults.mRawSuggestions) {
@@ -1064,6 +1078,58 @@ public class DictionaryFacilitatorImpl implements DictionaryFacilitator {
             }
         }
         return filtered.isEmpty() ? suggestions : filtered;
+    }
+
+    // --- Personalized ranking (issue #2): continuous demotion on rejection, recovery on accept ---
+    // Per-word penalty, lowercase key. In-memory only for now; persistence in a follow-up.
+    private final java.util.concurrent.ConcurrentHashMap<String, Integer> mRejectionPenalties =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Penalty added per rejection. */
+    private static final int REJECTION_PENALTY_INCREMENT = 1;
+    /** Cap so a word never gets buried deeper than this (keeps recovery realistic). */
+    private static final int REJECTION_PENALTY_MAX = 10;
+    /** Fraction of a word's own score shaved off per penalty point (0.05 = 5% per rejection). */
+    private static final double REJECTION_PENALTY_SCORE_SCALE = 0.05;
+
+    /**
+     * Adjust a word's rejection penalty. Positive delta = rejected (penalty up); negative =
+     * accepted (penalty down). Entry is removed once the penalty reaches zero (fully forgiven).
+     * Capped at REJECTION_PENALTY_MAX. Accepting a never-rejected word is a no-op.
+     */
+    private void adjustRejectionPenalty(final String word, final int delta) {
+        if (word == null || word.isEmpty()) return;
+        mRejectionPenalties.compute(word, (k, old) -> {
+            final int base = (old == null) ? 0 : old;
+            final int v = base + delta;
+            if (v <= 0) return null;           // forgiven (or never penalized) — drop the entry
+            return Math.min(v, REJECTION_PENALTY_MAX);
+        });
+    }
+
+    /**
+     * Returns a copy of the suggestion list with each rejected word's effective score reduced
+     * proportionally to its accumulated penalty. Continuous demotion — no word is ever removed,
+     * it only sinks in rank. Un-penalized words pass through unchanged.
+     */
+    private ArrayList<SuggestedWordInfo> applyRejectionPenalty(
+            final ArrayList<SuggestedWordInfo> suggestions) {
+        if (suggestions == null || suggestions.isEmpty()) return suggestions;
+        final ArrayList<SuggestedWordInfo> result = new ArrayList<>(suggestions.size());
+        for (final SuggestedWordInfo info : suggestions) {
+            final Integer penalty = mRejectionPenalties.get(info.mWord.toLowerCase());
+            if (penalty == null || penalty <= 0) {
+                result.add(info);
+                continue;
+            }
+            final double factor = Math.max(0.0, 1.0 - penalty * REJECTION_PENALTY_SCORE_SCALE);
+            final int newScore = (int) Math.max(0, info.mScore * factor);
+            result.add(new SuggestedWordInfo(info.mWord, info.mPrevWordsContext, newScore,
+                    info.mKindAndFlags, info.mSourceDict, info.mIndexOfTouchPointOfSecondWord,
+                    info.mAutoCommitFirstWordConfidence, info.mCandidateIndex,
+                    info.mCandidateDescription));
+        }
+        return result;
     }
 
     public boolean isValidSpellingWord(final String word) {
