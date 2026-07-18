@@ -40,16 +40,17 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', 'gradle.properties', 'gradle/wrapper/gradle-wrapper.properties', '**/CMakeLists.txt') }}
           restore-keys: gradle-${{ runner.os }}-
 
-      - name: Build debug APK
+      - name: Build release APK
         env:
           # Bypass git-based versioning so every run gets a strictly-increasing
           # versionCode → sideloaded APKs reinstall cleanly over the previous one.
           VERSION_CODE: ${{ github.run_number }}
-        run: ./gradlew assembleDebug --no-daemon --stacktrace --build-cache
+        # Release build (optimized) — debug builds are too slow for the swipe engine and froze.
+        run: ./gradlew assembleUnstableRelease --no-daemon --stacktrace --build-cache
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: futo-keyboard-debug-apk
+          name: futo-keyboard-release-apk
           path: build/outputs/apk/**/*.apk
           if-no-files-found: error
